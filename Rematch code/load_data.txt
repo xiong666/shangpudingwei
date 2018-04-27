@@ -1,0 +1,21 @@
+Drop table if exists xiong_shop;
+CREATE TABLE if not exists xiong_shop AS
+select * from odps_tc_257100_f673506e024.ant_tianchi_ccf_sl_shop_info;
+
+Drop table if exists xiong_df;
+CREATE TABLE if not exists xiong_df AS
+select * from odps_tc_257100_f673506e024.ant_tianchi_ccf_sl_user_shop_behavior;
+
+Drop table if exists xiong_test1;
+CREATE TABLE if not exists xiong_test1 AS
+select * from odps_tc_257100_f673506e024.ant_tianchi_ccf_sl_test; 
+
+Drop table if exists xiong_df_merge;
+CREATE TABLE if not exists xiong_df_merge as
+select a.*,b.category_id,b.longitude as zhun_longitude,b.latitude as zhun_latitude,b.price,b.mall_id
+from xiong_df a left outer join xiong_shop b 
+on a.shop_id=b.shop_id;
+
+
+
+

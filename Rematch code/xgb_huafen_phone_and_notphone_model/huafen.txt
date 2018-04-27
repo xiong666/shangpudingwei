@@ -1,0 +1,31 @@
+--分苹果和非苹果训练xiong_tian20171208_1
+drop table if exists xiong_train_huafen;
+create table if not exists xiong_train_huafen as
+select t.*,if(split_part(split_part(wifi_infos,';',1),'|',2)='null',1,0) as is_phone
+from xiong_tian20171208_1 t;
+
+drop table if exists xiong_train_isphone;
+create table if not exists xiong_train_isphone as
+select * from xiong_train_huafen
+where is_phone=1;
+
+drop table if exists xiong_train_notphone;
+create table if not exists xiong_train_notphone as
+select * from xiong_train_huafen
+where is_phone=0;
+
+--分苹果和非苹果训练xiong_test_tian20171208_1
+drop table if exists xiong_test_huafen;
+create table if not exists xiong_test_huafen as
+select t.*,if(split_part(split_part(wifi_infos,';',1),'|',2)='null',1,0) as is_phone
+from xiong_test_tian20171208_1;
+
+drop table if exists xiong_test_isphone;
+create table if not exists xiong_test_isphone as
+select * from xiong_test_huafen
+where is_phone=1;
+
+drop table if exists xiong_test_notphone;
+create table if not exists xiong_test_notphone as
+select * from xiong_test_huafen
+where is_phone=0;

@@ -1,0 +1,864 @@
+--对缺失的强度填-68
+-- ##################### start test candidate ###############################
+--  ##### 对xiong_df_merge的wifi_infos进行切分成行的形式 保存于表xiong_df_merge_split ######
+Drop table if exists xiong_df_merge_split;
+create table if not exists xiong_df_merge_split as
+select xiong_df_merge.*, wifi_infos2 from xiong_df_merge 
+lateral view explode(split(wifi_infos, ';')) myTable as wifi_infos2;
+
+--  ##### 对xiong_df_merge_split的wifi_infos2进行切分成 wifi_name,wifi_strength,wifi_connect ######
+Drop table if exists xiong_df_merge_split_wifi;
+create table if not exists xiong_df_merge_split_wifi as
+select
+      split_part(wifi_infos2,'|',1) as wifi_name,
+      cast(if(split_part(wifi_infos2,'|',2)='null',-68,split_part(wifi_infos2,'|',2)) as int) as wifi_strength,
+	  if(split_part(wifi_infos2,'|',3)="true ",1,0) as wifi_connect,
+      xiong_df_merge_split.*
+from xiong_df_merge_split;
+
+--先对 xiong_df_merge_split_wifi 每个 shop_id,wifi_name分组进行strength排序（从大到小）
+Drop table if exists xiong_df_merge_split_wifi_paixu;
+CREATE TABLE if not exists  xiong_df_merge_split_wifi_paixu AS
+select * from
+        (
+          SELECT 
+                row_number() over(partition by wifi_name order by wifi_strength desc) as rowNum
+              ,user_id,shop_id,time_stamp
+              ,wifi_name,wifi_strength,wifi_connect,longitude,latitude,wifi_infos,category_id,zhun_longitude,zhun_latitude,price,mall_id,wifi_infos2
+          FROM  xiong_df_merge_split_wifi 
+        ) temp;
+		
+-- 取xiong_df_merge_split_wifi_paixu取每组wifi_name中的wifi_strength的最大值 保存在表xiong_c1_1中
+Drop table if exists xiong_c1_1;
+CREATE TABLE if not exists xiong_c1_1 AS
+select * from  xiong_df_merge_split_wifi_paixu t where t.rownum =1;
+ 
+--## 对于xiong_df_merge_split_wifi_paixud对xiong_c1_1的merge 每组wifi_name 的最大wifi_strength 保存在xiong_c1_2
+Drop table if exists xiong_c1_2;
+CREATE TABLE if not exists xiong_c1_2 as
+select a.*,b.wifi_strength as max_wifi_strength
+from xiong_df_merge_split_wifi_paixu a left outer join xiong_c1_1 b
+on a.wifi_name=b.wifi_name;
+
+-- ##  对xiong_c1_2中的每组wifi_strength减去这组中wifi_name所对应的shop_id中的wifi_strength最大值 保存在xiong_c1_3
+--#测试集的候选集为 xiong_c1_4
+-- ##  对xiong_c1_2中的每组wifi_strength减去这组中wifi_name所对应的shop_id中的wifi_strength最大值 保存在xiong_c1_3
+Drop table if exists xiong_c1_3;
+CREATE TABLE if not exists xiong_c1_3 as
+select a.*,a.wifi_strength-a.max_wifi_strength strength_dif
+from xiong_c1_2 a;
+
+-- ## 对xiong_c1_3中strength_dif大于-35的作为候选集 并保存在xiong_c1_4
+Drop table if exists xiong_c1_4;
+CREATE TABLE if not exists xiong_c1_4 as
+select * from xiong_c1_3 where strength_dif>=-50;
+
+Drop table if exists xiong_c1_4_2;
+create table if not exists xiong_c1_4_2 as
+select distinct wifi_name,shop_id from xiong_c1_4;
+select * from xiong_c1_4_2;
+
+--########################## end test candidate ##################################
+
+--######################## start make test #######################################
+--对测试集xiong_test1进行行排序，并取top10的wifi,保存于xiong_test7
+--wifi_infos变为多行（同时可用于候选集提取和shopwifi交叉特征提取）xiong_test2
+Drop table if exists xiong_test2;
+create table if not exists xiong_test2 as
+select  xiong_test1.*, wifi_infos2 from xiong_test1 
+lateral view explode(split(wifi_infos, ';')) myTable as wifi_infos2;
+select * from xiong_test2;
+
+--wifi_infos调转强度和id顺序xiong_test3
+Drop table if exists xiong_test3;
+create table if not exists xiong_test3 as
+select
+      xiong_test2.*,
+	  concat(if(split_part(wifi_infos2,'|',2)='null','-68',split_part(wifi_infos2,'|',2)),'|',split_part(wifi_infos2,'|',1),'|',split_part(wifi_infos2,'|',3)) as wifi_infos3
+from xiong_test2;
+select * from xiong_test3;
+
+--wifi多行变为同记录的一行，同时wifi已经根据强度排序xiong_test4
+Drop table if exists xiong_test4;
+create table if not exists xiong_test4 as
+select 
+      user_id,row_id,time_stamp,longitude,latitude,wifi_infos,
+      concat_ws(';',collect_set(wifi_infos3)) as wifi_infos4
+from xiong_test3 
+group by user_id,row_id,time_stamp,longitude,latitude,wifi_infos;
+select * from xiong_test4;
+
+--按照wifi强度从大到小拆分出10个wifi特征xiong_test5
+Drop table if exists xiong_test5;
+create table if not exists xiong_test5 as
+select
+      xiong_test4.*,
+      split_part(split_part(wifi_infos4,';',1),'|',2) as wifi1_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',1),'|',1)='null' or split_part(split_part(wifi_infos4,';',1),'|',1)=='',null,split_part(split_part(wifi_infos4,';',1),'|',1)) as int)  as wifi1_signal,
+	  if(split_part(split_part(wifi_infos4,';',1),'|',3)='null' or split_part(split_part(wifi_infos4,';',1),'|',3)='',null,split_part(split_part(wifi_infos4,';',1),'|',3)) as wifi1_flag,
+	  
+	  split_part(split_part(wifi_infos4,';',2),'|',2) as wifi2_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',2),'|',1)='null' or split_part(split_part(wifi_infos4,';',2),'|',1)='',null,split_part(split_part(wifi_infos4,';',2),'|',1)) as int)  as wifi2_signal,
+	  
+	  split_part(split_part(wifi_infos4,';',3),'|',2) as wifi3_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',3),'|',1)='null' or split_part(split_part(wifi_infos4,';',3),'|',1)='',null,split_part(split_part(wifi_infos4,';',3),'|',1)) as int)  as wifi3_signal,
+	  
+	  split_part(split_part(wifi_infos4,';',4),'|',2) as wifi4_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',4),'|',1)='null' or split_part(split_part(wifi_infos4,';',4),'|',1)='',null,split_part(split_part(wifi_infos4,';',4),'|',1)) as int)  as wifi4_signal,
+	  
+	  split_part(split_part(wifi_infos4,';',5),'|',2) as wifi5_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',5),'|',1)='null' or split_part(split_part(wifi_infos4,';',5),'|',1)='',null,split_part(split_part(wifi_infos4,';',5),'|',1)) as int)  as wifi5_signal,
+	  
+	  split_part(split_part(wifi_infos4,';',6),'|',2) as wifi6_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',6),'|',1)='null' or split_part(split_part(wifi_infos4,';',6),'|',1)='',null,split_part(split_part(wifi_infos4,';',6),'|',1)) as int)  as wifi6_signal,	  
+
+	  split_part(split_part(wifi_infos4,';',7),'|',2) as wifi7_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',7),'|',1)='null' or split_part(split_part(wifi_infos4,';',7),'|',1)='',null,split_part(split_part(wifi_infos4,';',7),'|',1)) as int)  as wifi7_signal,
+	  
+	  split_part(split_part(wifi_infos4,';',8),'|',2) as wifi8_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',8),'|',1)='null' or split_part(split_part(wifi_infos4,';',8),'|',1)='',null,split_part(split_part(wifi_infos4,';',8),'|',1)) as int)  as wifi8_signal,
+	  
+	  split_part(split_part(wifi_infos4,';',9),'|',2) as wifi9_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',9),'|',1)='null' or split_part(split_part(wifi_infos4,';',9),'|',1)='',null,split_part(split_part(wifi_infos4,';',9),'|',1)) as int)  as wifi9_signal,
+	  
+	  split_part(split_part(wifi_infos4,';',10),'|',2) as wifi10_bssid,
+      cast(if(split_part(split_part(wifi_infos4,';',10),'|',1)='null' or split_part(split_part(wifi_infos4,';',10),'|',1)='',null,split_part(split_part(wifi_infos4,';',10),'|',1)) as int)  as wifi10_signal
+from xiong_test4;
+select * from xiong_test5;
+
+--  ##### 对xiong_test5的wifi_infos4进行切分成行的形式 保存于表xiong_test6 ######
+Drop table if exists xiong_test6;
+create table if not exists xiong_test6 as
+select xiong_test5.*, wifi_infos6 from xiong_test5
+lateral view explode(split(wifi_infos, ';')) myTable as wifi_infos6;
+
+--  ##### 对xiong_test6的wifi_infos2进行切分成 wifi_name,wifi_strength,wifi_connect 保存于表xiong_test7 ######
+Drop table if exists xiong_test7;
+create table if not exists xiong_test7 as
+select
+      split_part(wifi_infos6,'|',1) as wifi_name,
+      cast(if(split_part(wifi_infos6,'|',2)='null' or split_part(wifi_infos6,'|',2)='',null,split_part(wifi_infos6,'|',2)) as int) as wifi_strength,
+	  if(split_part(wifi_infos6,'|',3)='null',null,split_part(wifi_infos6,'|',3)='null') as wifi_connect,
+      xiong_test6.*
+from xiong_test6;
+
+--################################### end make test ###################################################
+
+--###################### test merge candidate ##################################################
+--xiong_test7去根据wifi_name去merge它的候选集 xiong_c1_4_2
+Drop table if exists xiong_test_merge_candidate1;
+CREATE TABLE if not exists xiong_test_merge_candidate1 as
+select a.*,b.shop_id as can_shop_id
+from xiong_test7 a left outer join xiong_c1_4_2 b 
+on a.wifi_name=b.wifi_name;
+--##################### end test merge candidate  ###########################################
+
+--#################### 去重xiong_test_merge_candidate1  ####################################
+--对于xiong_test_merge_candidate1，有重复的字段为row_id，can_shop_id
+--要求得到这两个字段唯一的结果集,并保留重复记录中的第一条记录
+drop table if exists xiong_test_merge_candidate2;
+create table if not exists xiong_test_merge_candidate2 as
+select   row_number() over(partition by user_id,row_id,time_stamp,longitude,latitude,wifi_infos,can_shop_id order by wifi_strength desc) as paixu,count(row_id) over (partition by user_id,row_id,time_stamp,longitude,latitude,wifi_infos,can_shop_id order by row_id ) as autoID, t.* from xiong_test_merge_candidate1 t;
+
+drop table if exists xiong_test_merge_candidate3;
+create table if not exists xiong_test_merge_candidate3 as
+select *  from xiong_test_merge_candidate2 t where t.paixu=1;
+
+--drop table if exists xiong_test_merge_candidate4;
+--create table if not exists xiong_test_merge_candidate4 as
+--select * from xiong_test_merge_candidate2 where autoID in(select autoID from xiong_test_merge_candidate3);
+
+----#################### 结束去重xiong_test_merge_candidate1  ####################################
+
+----################### make feature for test ############################
+--特征4：对xiong_df_merge_split_wifi中的每一个shop里面的wifi进行合并成总的wifi_infos_zong，算出记录里面的wifi_infos在wifi_infos_zong里面出现的次数
+drop table if exists test_feature4;
+create table if not exists test_feature4 as
+select 
+      shop_id,concat_ws('|',collect_set(wifi_name)) as can_wifi_infos_zong,
+	  concat_ws('|',collect_set(concat(wifi_strength,';',wifi_name))) as can_wifi_infos_kong
+from  xiong_df_merge_split_wifi
+group by shop_id;
+select * from test_feature4;
+
+Drop table if exists xiong_test_merge_feature4_1;
+create table if not exists xiong_test_merge_feature4_1 as
+select a.*,b.can_wifi_infos_zong,b.can_wifi_infos_kong
+from xiong_test_merge_candidate3 a left outer join test_feature4 b
+on a.can_shop_id=b.shop_id;
+
+Drop table if exists xiong_test_merge_feature4_2;
+create table if not exists xiong_test_merge_feature4_2 as
+select xiong_test_merge_feature4_1.*,split_part(can_wifi_infos_kong,'|',1,10) as swifi_infos10,
+split_part(can_wifi_infos_kong,'|',1,20) as swifi_infos20,split_part(can_wifi_infos_kong,'|',1,30) as swifi_infos30,split_part(can_wifi_infos_kong,'|',1,40) as swifi_infos40,
+split_part(can_wifi_infos_kong,'|',1,50) as swifi_infos50,split_part(can_wifi_infos_kong,'|',1,80) as swifi_infos80,wifi_he4 
+from xiong_test_merge_feature4_1 
+lateral view explode(split(wifi_infos, ';')) myTable as wifi_he4;
+
+Drop table if exists xiong_test_merge_feature4_3;
+create table if not exists xiong_test_merge_feature4_3 as
+select  a.*,if(can_wifi_infos_zong rlike split_part(wifi_he4,'|',2),1,0) as wifi_infos_in_swifi_infos,
+if(swifi_infos10 rlike split_part(wifi_he4,'|',2),1,0) as wifi_infos_in_swifi_infos10,if(swifi_infos20 rlike split_part(wifi_he4,'|',2),1,0) as wifi_infos_in_swifi_infos20,
+if(swifi_infos30 rlike split_part(wifi_he4,'|',2),1,0) as wifi_infos_in_swifi_infos30,if(swifi_infos40 rlike split_part(wifi_he4,'|',2),1,0) as wifi_infos_in_swifi_infos40,
+if(swifi_infos50 rlike split_part(wifi_he4,'|',2),1,0) as wifi_infos_in_swifi_infos50,if(swifi_infos80 rlike split_part(wifi_he4,'|',2),1,0) as wifi_infos_in_swifi_infos80,
+1 as all_num
+from xiong_test_merge_feature4_2 a;
+
+Drop table if exists xiong_test_merge_feature4_4;
+create table if not exists xiong_test_merge_feature4_4 as
+select row_id,paixu,autoid,wifi_name,wifi_strength,wifi_connect,user_id,time_stamp,longitude,latitude,wifi_infos,wifi_infos4,wifi1_bssid,wifi1_signal,wifi1_flag,wifi2_bssid,wifi2_signal,wifi3_bssid,wifi3_signal,
+wifi4_bssid,wifi4_signal,wifi5_bssid,wifi5_signal,wifi6_bssid,wifi6_signal,wifi7_bssid,wifi7_signal,wifi8_bssid,wifi8_signal,wifi9_bssid,wifi9_signal,
+wifi10_bssid,wifi10_signal,wifi_infos6,can_shop_id,can_wifi_infos_zong,can_wifi_infos_kong,
+sum(all_num) as wifi_number,
+sum(wifi_infos_in_swifi_infos) as wifi_infos_in_swifi_infos,sum(wifi_infos_in_swifi_infos)/sum(all_num) as wifi_infos_in_swifi_infos_lv,
+sum(wifi_infos_in_swifi_infos10) as wifi_infos_in_swifi_infos10,sum(wifi_infos_in_swifi_infos10)/sum(all_num) as wifi_infos_in_swifi_infos_lv10,
+sum(wifi_infos_in_swifi_infos20) as wifi_infos_in_swifi_infos20,sum(wifi_infos_in_swifi_infos20)/sum(all_num) as wifi_infos_in_swifi_infos_lv20,
+sum(wifi_infos_in_swifi_infos30) as wifi_infos_in_swifi_infos30,sum(wifi_infos_in_swifi_infos30)/sum(all_num) as wifi_infos_in_swifi_infos_lv30,
+sum(wifi_infos_in_swifi_infos40) as wifi_infos_in_swifi_infos40,sum(wifi_infos_in_swifi_infos40)/sum(all_num) as wifi_infos_in_swifi_infos_lv40,
+sum(wifi_infos_in_swifi_infos50) as wifi_infos_in_swifi_infos50,sum(wifi_infos_in_swifi_infos50)/sum(all_num) as wifi_infos_in_swifi_infos_lv50,
+sum(wifi_infos_in_swifi_infos80) as wifi_infos_in_swifi_infos80,sum(wifi_infos_in_swifi_infos80)/sum(all_num) as wifi_infos_in_swifi_infos_lv80
+from xiong_test_merge_feature4_3 
+group by row_id,paixu,autoid,wifi_name,wifi_strength,wifi_connect,user_id,time_stamp,longitude,latitude,wifi_infos,wifi_infos4,wifi1_bssid,wifi1_signal,wifi1_flag,wifi2_bssid,wifi2_signal,wifi3_bssid,wifi3_signal,
+wifi4_bssid,wifi4_signal,wifi5_bssid,wifi5_signal,wifi6_bssid,wifi6_signal,wifi7_bssid,wifi7_signal,wifi8_bssid,wifi8_signal,wifi9_bssid,wifi9_signal,
+wifi10_bssid,wifi10_signal,wifi_infos6,can_shop_id,can_wifi_infos_zong,can_wifi_infos_kong;
+select * from xiong_test_merge_feature4_4;
+
+--从xiong_df_merge_split_wifi_paixu中找出每个shop_id里面wifi_strength的平均值
+drop table if exists test_feature1_1;
+create table if not exists test_feature1_1 as 
+select shop_id,avg(wifi_strength) as shop_avg_wifi_strength
+from xiong_df_merge_split_wifi_paixu group by shop_id;
+
+--特征1：从xiong_df_merge_split_wifi_paixu中找出每个wifi,shop_id 里面wifi_strength的平均值
+drop table if exists test_feature2_1;
+create table if not exists test_feature2_1 as 
+select wifi_name,shop_id,avg(wifi_strength) as shop_wifi_avg_wifi_strength
+from xiong_df_merge_split_wifi_paixu group by wifi_name,shop_id;
+
+--让xiong_test_merge_candidate3去按照shop_id去mergete特征test_feature1_1
+drop table if exists xiong_test_merge_feature1;
+create table if not exists xiong_test_merge_feature1 as
+select a.*,b.shop_avg_wifi_strength 
+from xiong_test_merge_feature4_4 a left outer join test_feature1_1 b 
+on a.can_shop_id=b.shop_id;
+
+--特征2：让xiong_train_merge_feature1去按照shop_id,wifi_name去merge特征train_feature2_1
+drop table if exists xiong_test_merge_feature2_1;
+create table if not exists xiong_test_merge_feature2_1 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_1
+from xiong_test_merge_feature1 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi1_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_2;
+create table if not exists xiong_test_merge_feature2_2 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_2
+from xiong_test_merge_feature2_1 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi2_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_3;
+create table if not exists xiong_test_merge_feature2_3 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_3
+from xiong_test_merge_feature2_2 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi3_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_4;
+create table if not exists xiong_test_merge_feature2_4 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_4
+from xiong_test_merge_feature2_3 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi4_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_5;
+create table if not exists xiong_test_merge_feature2_5 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_5
+from xiong_test_merge_feature2_4 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi5_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_6;
+create table if not exists xiong_test_merge_feature2_6 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_6
+from xiong_test_merge_feature2_5 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi6_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_7;
+create table if not exists xiong_test_merge_feature2_7 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_7
+from xiong_test_merge_feature2_6 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi7_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_8;
+create table if not exists xiong_test_merge_feature2_8 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_8
+from xiong_test_merge_feature2_7 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi8_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_9;
+create table if not exists xiong_test_merge_feature2_9 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_9
+from xiong_test_merge_feature2_8 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi9_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature2_10_2;
+create table if not exists xiong_test_merge_feature2_10_2 as
+select a.*,b.shop_wifi_avg_wifi_strength as shop_wifi_avg_wifi_strength_10
+from xiong_test_merge_feature2_9 a left outer join test_feature2_1 b 
+on a.can_shop_id=b.shop_id and a.wifi10_bssid=b.wifi_name;
+
+--特征3_1：让xiong_test_merge_feature2_10_2的每一列wifi强度去减去shop_avg_wifi_strength 
+drop table if exists xiong_test_merge_feature1_2;
+create table if not exists xiong_test_merge_feature1_2 as
+select a.*,
+--a.wifi1_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff1,a.wifi2_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff2,
+--a.wifi3_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff3,a.wifi4_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff4,
+--a.wifi5_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff5,a.wifi6_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff6,
+--a.wifi7_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff7,a.wifi8_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff8,
+--a.wifi9_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff9,a.wifi10_signal-a.shop_avg_wifi_strength shop_avg_wifi_strength_diff10,
+
+a.wifi1_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen1,a.wifi2_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen2,
+a.wifi3_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen3,a.wifi4_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen4,
+a.wifi5_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen5,a.wifi6_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen6,
+a.wifi7_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen7,a.wifi8_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen8,
+a.wifi9_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen9,a.wifi10_signal/a.shop_avg_wifi_strength shop_avg_wifi_strength_baifen10
+from xiong_test_merge_feature2_10_2 a;
+
+--特征3_2：让xiong_train_merge_feature1_2的每一列wifi强度去减去相应的hop_wifi_avg_wifi_strength_*
+drop table if exists xiong_test_merge_feature3_1;
+create table if not exists xiong_test_merge_feature3_1 as
+select a.*,
+a.wifi1_signal-a.shop_wifi_avg_wifi_strength_1 shop_wifi_avg_wifi_strength_1_diff,a.wifi2_signal-a.shop_wifi_avg_wifi_strength_2 shop_wifi_avg_wifi_strength_2_diff,
+a.wifi3_signal-a.shop_wifi_avg_wifi_strength_3 shop_wifi_avg_wifi_strength_3_diff,a.wifi4_signal-a.shop_wifi_avg_wifi_strength_1 shop_wifi_avg_wifi_strength_4_diff,
+a.wifi5_signal-a.shop_wifi_avg_wifi_strength_5 shop_wifi_avg_wifi_strength_5_diff,a.wifi6_signal-a.shop_wifi_avg_wifi_strength_6 shop_wifi_avg_wifi_strength_6_diff,
+a.wifi7_signal-a.shop_wifi_avg_wifi_strength_7 shop_wifi_avg_wifi_strength_7_diff,a.wifi8_signal-a.shop_wifi_avg_wifi_strength_8 shop_wifi_avg_wifi_strength_8_diff,
+a.wifi9_signal-a.shop_wifi_avg_wifi_strength_9 shop_wifi_avg_wifi_strength_9_diff,a.wifi10_signal-a.shop_wifi_avg_wifi_strength_10 shop_wifi_avg_wifi_strength_10_diff
+
+--a.wifi1_signal/a.shop_wifi_avg_wifi_strength_1 shop_wifi_avg_wifi_strength_1_baifen,a.wifi2_signal/a.shop_wifi_avg_wifi_strength_2 shop_wifi_avg_wifi_strength_2_baifen,
+--a.wifi3_signal/a.shop_wifi_avg_wifi_strength_3 shop_wifi_avg_wifi_strength_3_baifen,a.wifi4_signal/a.shop_wifi_avg_wifi_strength_1 shop_wifi_avg_wifi_strength_4_baifen,
+--a.wifi5_signal/a.shop_wifi_avg_wifi_strength_5 shop_wifi_avg_wifi_strength_5_baifen,a.wifi6_signal/a.shop_wifi_avg_wifi_strength_6 shop_wifi_avg_wifi_strength_6_baifen,
+--a.wifi7_signal/a.shop_wifi_avg_wifi_strength_7 shop_wifi_avg_wifi_strength_7_baifen,a.wifi8_signal/a.shop_wifi_avg_wifi_strength_8 shop_wifi_avg_wifi_strength_8_baifen,
+--a.wifi9_signal/a.shop_wifi_avg_wifi_strength_9 shop_wifi_avg_wifi_strength_9_baifen,a.wifi10_signal-a.shop_wifi_avg_wifi_strength_10 shop_wifi_avg_wifi_strength_10_baifen
+from xiong_test_merge_feature1_2 a;
+
+
+--为了让生成的结果可以merge到那个row_id和相关的can_shop_id，对其进行行打标为row_id_num，并保存于表 xiong_test_merge_feature3_1_row 
+--drop table if exists xiong_test_merge_feature3_1_row;
+--create table if not exists xiong_test_merge_feature3_1_row as
+--select * from
+--        (
+--          SELECT 
+--                row_number() over(partition by row_id order by wifi_name) as row_id_num
+--             ,t.*
+--          FROM  xiong_test_merge_feature3_1 t
+--        ) temp;
+
+
+--特征5：对xiong_shop中的shop_id计算其平均价格 并保存于test_feature5
+--特征6：对xiong_shop中的shop_id计算其标准经纬度,并保存于test_feature5
+Drop table if exists test_feature5;
+create table if not exists test_feature5 as
+select 
+      shop_id,longitude,latitude,avg(price) as avg_price
+from xiong_shop
+group by shop_id,longitude,latitude;
+select * from test_feature5;
+
+--让xiong_test_merge_feature3_1中的can_shop_id去merge其平均价格和标准经纬度
+drop table if exists xiong_test_merge_feature5_1;
+create table if not exists xiong_test_merge_feature5_1 as
+select a.*,b.avg_price as avg_price,b.longitude as longitude_biao,b.latitude as latitude_biao
+from xiong_test_merge_feature3_1 a left outer join test_feature5 b 
+on a.can_shop_id=b.shop_id;
+
+----让xiong_test_merge_feature5_1中算出记录经纬度与标准经纬度的距离
+drop table if exists xiong_test_merge_feature5_2;
+create table if not exists xiong_test_merge_feature5_2 as
+select a.*,(2*asin(sqrt((sin((radians(latitude)-radians(latitude_biao))*0.5)*sin((radians(latitude)-radians(latitude_biao))*0.5))+cos(radians(latitude))*cos(radians(latitude_biao))*(sin((radians(longitude) - radians(longitude_biao))*0.5)*sin((radians(longitude) - radians(longitude_biao))*0.5))))*6371000) as distance
+from xiong_test_merge_feature5_1 a;
+
+--手动选取xiong_test_merge_feature5_2列
+drop table if exists xiong_test_merge_feature_zong1;
+create table if not exists xiong_test_merge_feature_zong1 as
+select row_id,paixu,autoid,wifi_name,wifi_strength,wifi_connect,user_id,time_stamp,longitude,latitude,wifi_infos,
+wifi1_bssid,wifi1_signal,wifi1_flag,wifi2_bssid,wifi2_signal,wifi3_bssid,wifi3_signal,
+wifi4_bssid,wifi4_signal,wifi5_bssid,wifi5_signal,wifi6_bssid,wifi6_signal,wifi7_bssid,wifi7_signal,wifi8_bssid,wifi8_signal,wifi9_bssid,wifi9_signal,
+wifi10_bssid,wifi10_signal,
+can_shop_id,
+wifi_number,wifi_infos_in_swifi_infos_lv,wifi_infos_in_swifi_infos_lv10,wifi_infos_in_swifi_infos_lv20,wifi_infos_in_swifi_infos_lv30,wifi_infos_in_swifi_infos_lv40,
+wifi_infos_in_swifi_infos_lv50,wifi_infos_in_swifi_infos_lv80,
+shop_avg_wifi_strength,shop_wifi_avg_wifi_strength_1,shop_wifi_avg_wifi_strength_2,shop_wifi_avg_wifi_strength_3,
+shop_wifi_avg_wifi_strength_4,shop_wifi_avg_wifi_strength_5,shop_wifi_avg_wifi_strength_6,shop_wifi_avg_wifi_strength_7,shop_wifi_avg_wifi_strength_8,shop_wifi_avg_wifi_strength_9,
+shop_wifi_avg_wifi_strength_10,
+shop_avg_wifi_strength_baifen1,shop_avg_wifi_strength_baifen2,shop_avg_wifi_strength_baifen3,shop_avg_wifi_strength_baifen4,shop_avg_wifi_strength_baifen5,
+shop_avg_wifi_strength_baifen6,shop_avg_wifi_strength_baifen7,shop_avg_wifi_strength_baifen8,shop_avg_wifi_strength_baifen9,shop_avg_wifi_strength_baifen10,
+shop_wifi_avg_wifi_strength_1_diff,shop_wifi_avg_wifi_strength_2_diff,shop_wifi_avg_wifi_strength_3_diff,shop_wifi_avg_wifi_strength_4_diff,shop_wifi_avg_wifi_strength_5_diff,
+shop_wifi_avg_wifi_strength_6_diff,shop_wifi_avg_wifi_strength_7_diff,shop_wifi_avg_wifi_strength_8_diff,shop_wifi_avg_wifi_strength_9_diff,shop_wifi_avg_wifi_strength_10_diff,
+avg_price,
+longitude_biao,latitude_biao,distance
+from xiong_test_merge_feature5_2;
+
+
+--特征7：计算xiong_df_merge_split_wifi_paixu中的wifi的经纬度的中位数
+Drop table if exists test_feature7;
+create table if not exists test_feature7 as
+select 
+      wifi_name,median(longitude) as wifi_longitude,median(latitude) as wifi_latitude
+from xiong_df_merge_split_wifi_paixu
+group by wifi_name;
+select * from test_feature7;
+--把feature7的经纬度匹配进入xiong_test_merge_feature5_2
+drop table if exists xiong_test_merge_feature5_3;
+create table if not exists xiong_test_merge_feature5_3 as
+select a.*,b.wifi_longitude as wifi_longitude1,b.wifi_latitude as wifi_latitude1
+from xiong_test_merge_feature_zong1 a left outer join test_feature7 b 
+on a.wifi1_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_4;
+create table if not exists xiong_test_merge_feature5_4 as
+select a.*,b.wifi_longitude as wifi_longitude2,b.wifi_latitude as wifi_latitude2
+from xiong_test_merge_feature5_3 a left outer join test_feature7 b 
+on a.wifi2_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_5;
+create table if not exists xiong_test_merge_feature5_5 as
+select a.*,b.wifi_longitude as wifi_longitude3,b.wifi_latitude as wifi_latitude3
+from xiong_test_merge_feature5_4 a left outer join test_feature7 b 
+on a.wifi3_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_6;
+create table if not exists xiong_test_merge_feature5_6 as
+select a.*,b.wifi_longitude as wifi_longitude4,b.wifi_latitude as wifi_latitude4
+from xiong_test_merge_feature5_5 a left outer join test_feature7 b 
+on a.wifi4_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_7;
+create table if not exists xiong_test_merge_feature5_7 as
+select a.*,b.wifi_longitude as wifi_longitude5,b.wifi_latitude as wifi_latitude5
+from xiong_test_merge_feature5_6 a left outer join test_feature7 b 
+on a.wifi5_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_8;
+create table if not exists xiong_test_merge_feature5_8 as
+select a.*,b.wifi_longitude as wifi_longitude6,b.wifi_latitude as wifi_latitude6
+from xiong_test_merge_feature5_7 a left outer join test_feature7 b 
+on a.wifi6_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_9;
+create table if not exists xiong_test_merge_feature5_9 as
+select a.*,b.wifi_longitude as wifi_longitude7,b.wifi_latitude as wifi_latitude7
+from xiong_test_merge_feature5_8 a left outer join test_feature7 b 
+on a.wifi7_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_10;
+create table if not exists xiong_test_merge_feature5_10 as
+select a.*,b.wifi_longitude as wifi_longitude8,b.wifi_latitude as wifi_latitude8
+from xiong_test_merge_feature5_9 a left outer join test_feature7 b 
+on a.wifi8_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_11;
+create table if not exists xiong_test_merge_feature5_11 as
+select a.*,b.wifi_longitude as wifi_longitude9,b.wifi_latitude as wifi_latitude9
+from xiong_test_merge_feature5_10 a left outer join test_feature7 b 
+on a.wifi9_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature5_12;
+create table if not exists xiong_test_merge_feature5_12 as
+select a.*,b.wifi_longitude as wifi_longitude10,b.wifi_latitude as wifi_latitude10
+from xiong_test_merge_feature5_11 a left outer join test_feature7 b 
+on a.wifi10_bssid=b.wifi_name;
+
+--特征8：计算xiong_df_merge_split_wifi_paixu中的wifi|shop的经纬度的中位数
+Drop table if exists test_feature8;
+create table if not exists test_feature8 as
+select 
+      wifi_name,shop_id,median(longitude) as wifi_shop_longitude,median(latitude) as wifi_shop_latitude
+from xiong_df_merge_split_wifi_paixu
+group by wifi_name,shop_id;
+select * from test_feature8;
+--把feature8的经纬度匹配进入xiong_test_merge_feature5_12
+drop table if exists xiong_test_merge_feature6_1;
+create table if not exists xiong_test_merge_feature6_1 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude1,b.wifi_shop_latitude as wifi_shop_latitude1
+from xiong_test_merge_feature5_12 a left outer join test_feature8 b 
+on a.wifi1_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_2;
+create table if not exists xiong_test_merge_feature6_2 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude2,b.wifi_shop_latitude as wifi_shop_latitude2
+from xiong_test_merge_feature6_1 a left outer join test_feature8 b 
+on a.wifi2_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_3;
+create table if not exists xiong_test_merge_feature6_3 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude3,b.wifi_shop_latitude as wifi_shop_latitude3
+from xiong_test_merge_feature6_2 a left outer join test_feature8 b 
+on a.wifi3_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_4;
+create table if not exists xiong_test_merge_feature6_4 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude4,b.wifi_shop_latitude as wifi_shop_latitude4
+from xiong_test_merge_feature6_3 a left outer join test_feature8 b 
+on a.wifi4_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_5;
+create table if not exists xiong_test_merge_feature6_5 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude5,b.wifi_shop_latitude as wifi_shop_latitude5
+from xiong_test_merge_feature6_4 a left outer join test_feature8 b 
+on a.wifi5_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_6;
+create table if not exists xiong_test_merge_feature6_6 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude6,b.wifi_shop_latitude as wifi_shop_latitude6
+from xiong_test_merge_feature6_5 a left outer join test_feature8 b 
+on a.wifi6_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_7;
+create table if not exists xiong_test_merge_feature6_7 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude7,b.wifi_shop_latitude as wifi_shop_latitude7
+from xiong_test_merge_feature6_6 a left outer join test_feature8 b 
+on a.wifi7_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_8;
+create table if not exists xiong_test_merge_feature6_8 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude8,b.wifi_shop_latitude as wifi_shop_latitude8
+from xiong_test_merge_feature6_7 a left outer join test_feature8 b 
+on a.wifi8_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_9;
+create table if not exists xiong_test_merge_feature6_9 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude9,b.wifi_shop_latitude as wifi_shop_latitude9
+from xiong_test_merge_feature6_8 a left outer join test_feature8 b 
+on a.wifi9_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+drop table if exists xiong_test_merge_feature6_10;
+create table if not exists xiong_test_merge_feature6_10 as
+select a.*,b.wifi_shop_longitude as wifi_shop_longitude10,b.wifi_shop_latitude as wifi_shop_latitude10
+from xiong_test_merge_feature6_9 a left outer join test_feature8 b 
+on a.wifi10_bssid=b.wifi_name and a.can_shop_id=b.shop_id;
+
+--计算wifi|shop的经纬度与shop的距离
+drop table if exists xiong_test_merge_feature6_11;
+create table if not exists xiong_test_merge_feature6_11 as
+select a.*,
+sqrt((pow((wifi_shop_longitude1-longitude),2)+pow((wifi_shop_latitude1-latitude),2))) as wifi_shop_distance1,
+sqrt((pow((wifi_shop_longitude2-longitude),2)+pow((wifi_shop_latitude2-latitude),2))) as wifi_shop_distance2,
+sqrt((pow((wifi_shop_longitude3-longitude),2)+pow((wifi_shop_latitude3-latitude),2))) as wifi_shop_distance3,
+sqrt((pow((wifi_shop_longitude4-longitude),2)+pow((wifi_shop_latitude4-latitude),2))) as wifi_shop_distance4,
+sqrt((pow((wifi_shop_longitude5-longitude),2)+pow((wifi_shop_latitude5-latitude),2))) as wifi_shop_distance5,
+sqrt((pow((wifi_shop_longitude6-longitude),2)+pow((wifi_shop_latitude6-latitude),2))) as wifi_shop_distance6,
+sqrt((pow((wifi_shop_longitude7-longitude),2)+pow((wifi_shop_latitude7-latitude),2))) as wifi_shop_distance7,
+sqrt((pow((wifi_shop_longitude8-longitude),2)+pow((wifi_shop_latitude8-latitude),2))) as wifi_shop_distance8,
+sqrt((pow((wifi_shop_longitude9-longitude),2)+pow((wifi_shop_latitude9-latitude),2))) as wifi_shop_distance9,
+sqrt((pow((wifi_shop_longitude10-longitude),2)+pow((wifi_shop_latitude10-latitude),2))) as wifi_shop_distance10
+from xiong_test_merge_feature6_10 a;
+
+--特征9：计算xiong_df_merge_split_wifi_paixu中的user_id|shop的经纬度的中位数
+Drop table if exists test_feature9;
+create table if not exists test_feature9 as
+select 
+      user_id,shop_id,median(longitude) as user_shop_longitude,median(latitude) as user_shop_latitude
+from xiong_df_merge_split_wifi_paixu
+group by user_id,shop_id;
+select * from test_feature9;
+--把feature9的经纬度匹配进入 xiong_test_merge_feature6_11
+drop table if exists xiong_test_merge_feature9_1;
+create table if not exists xiong_test_merge_feature9_1 as
+select a.*,b.user_shop_longitude as user_shop_longitude1,b.user_shop_latitude as user_shop_latitude1
+from  xiong_test_merge_feature6_11 a left outer join test_feature9 b 
+on a.user_id=b.user_id and a.can_shop_id=b.shop_id;
+
+--计算user_id|shop的经纬度与shop的距离
+drop table if exists xiong_test_merge_feature9_2;
+create table if not exists xiong_test_merge_feature9_2 as
+select a.*,
+sqrt((pow((user_shop_longitude1-longitude),2)+pow((user_shop_latitude1-latitude),2))) as user_shop_distance1
+from xiong_test_merge_feature9_1 a;
+
+--顺便计算一下feature7的距离
+drop table if exists xiong_test_merge_feature5_13;
+create table if not exists xiong_test_merge_feature5_13 as
+select a.*,
+sqrt((pow((wifi_longitude1-longitude),2)+pow((wifi_latitude1-latitude),2))) as wifi_distance1,
+sqrt((pow((wifi_longitude2-longitude),2)+pow((wifi_latitude2-latitude),2))) as wifi_distance2,
+sqrt((pow((wifi_longitude3-longitude),2)+pow((wifi_latitude3-latitude),2))) as wifi_distance3,
+sqrt((pow((wifi_longitude4-longitude),2)+pow((wifi_latitude4-latitude),2))) as wifi_distance4,
+sqrt((pow((wifi_longitude5-longitude),2)+pow((wifi_latitude5-latitude),2))) as wifi_distance5,
+sqrt((pow((wifi_longitude6-longitude),2)+pow((wifi_latitude6-latitude),2))) as wifi_distance6,
+sqrt((pow((wifi_longitude7-longitude),2)+pow((wifi_latitude7-latitude),2))) as wifi_distance7,
+sqrt((pow((wifi_longitude8-longitude),2)+pow((wifi_latitude8-latitude),2))) as wifi_distance8,
+sqrt((pow((wifi_longitude9-longitude),2)+pow((wifi_latitude9-latitude),2))) as wifi_distance9,
+sqrt((pow((wifi_longitude10-longitude),2)+pow((wifi_latitude10-latitude),2))) as wifi_distance10
+from xiong_test_merge_feature9_2 a;
+
+--特征10：计算xiong_df_merge_split_wifi_paixu中中shop|wifi出现次数
+Drop table if exists test_feature10;
+create table if not exists test_feature10 as
+select 
+     shop_id,wifi_name,count(wifi_name) as shop_wifi_count
+from xiong_df_merge_split_wifi_paixu
+group by shop_id,wifi_name;
+select * from test_feature10;
+
+--把feature10的特征匹配进入xiong_test_merge_feature5_13
+drop table if exists xiong_test_merge_feature10_1;
+create table if not exists xiong_test_merge_feature10_1 as
+select a.*,b.shop_wifi_count as shop_wifi_count1
+from xiong_test_merge_feature5_13 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi1_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_2;
+create table if not exists xiong_test_merge_feature10_2 as
+select a.*,b.shop_wifi_count as shop_wifi_count2
+from xiong_test_merge_feature10_1 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi2_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_3;
+create table if not exists xiong_test_merge_feature10_3 as
+select a.*,b.shop_wifi_count as shop_wifi_count3
+from xiong_test_merge_feature10_2 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi3_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_4;
+create table if not exists xiong_test_merge_feature10_4 as
+select a.*,b.shop_wifi_count as shop_wifi_count4
+from xiong_test_merge_feature10_3 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi4_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_5;
+create table if not exists xiong_test_merge_feature10_5 as
+select a.*,b.shop_wifi_count as shop_wifi_count5
+from xiong_test_merge_feature10_4 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi5_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_6;
+create table if not exists xiong_test_merge_feature10_6 as
+select a.*,b.shop_wifi_count as shop_wifi_count6
+from xiong_test_merge_feature10_5 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi6_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_7;
+create table if not exists xiong_test_merge_feature10_7 as
+select a.*,b.shop_wifi_count as shop_wifi_count7
+from xiong_test_merge_feature10_6 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi7_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_8;
+create table if not exists xiong_test_merge_feature10_8 as
+select a.*,b.shop_wifi_count as shop_wifi_count8
+from xiong_test_merge_feature10_7 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi8_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_9;
+create table if not exists xiong_test_merge_feature10_9 as
+select a.*,b.shop_wifi_count as shop_wifi_count9
+from xiong_test_merge_feature10_8 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi9_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature10_10;
+create table if not exists xiong_test_merge_feature10_10 as
+select a.*,b.shop_wifi_count as shop_wifi_count10
+from xiong_test_merge_feature10_9 a left outer join test_feature10 b 
+on a.can_shop_id=b.shop_id and a.wifi10_bssid=b.wifi_name;
+
+--特征11：计算xiong_df_merge_split_wifi_paixu中shop|wifi为true的出现次数
+Drop table if exists test_feature11_temp;
+create table if not exists test_feature11_temp as
+select *
+from xiong_df_merge_split_wifi_paixu
+where split_part(wifi_infos2,'|',3)="true";
+
+Drop table if exists test_feature11;
+create table if not exists test_feature11 as
+select shop_id,wifi_name,count(wifi_name) as shop_wifi_connect_count
+from train_feature11_temp
+group by shop_id,wifi_name;
+
+--把feature11的特征匹配进入xiong_test_merge_feature10_10
+drop table if exists xiong_test_merge_feature11_1;
+create table if not exists xiong_test_merge_feature11_1 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count1
+from xiong_test_merge_feature10_10 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi1_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_2;
+create table if not exists xiong_test_merge_feature11_2 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count2
+from xiong_test_merge_feature11_1 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi2_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_3;
+create table if not exists xiong_test_merge_feature11_3 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count3
+from xiong_test_merge_feature11_2 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi3_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_4;
+create table if not exists xiong_test_merge_feature11_4 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count4
+from xiong_test_merge_feature11_3 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi4_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_5;
+create table if not exists xiong_test_merge_feature11_5 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count5
+from xiong_test_merge_feature11_4 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi5_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_6;
+create table if not exists xiong_test_merge_feature11_6 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count6
+from xiong_test_merge_feature11_5 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi6_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_7;
+create table if not exists xiong_test_merge_feature11_7 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count7
+from xiong_test_merge_feature11_6 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi7_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_8;
+create table if not exists xiong_test_merge_feature11_8 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count8
+from xiong_test_merge_feature11_7 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi8_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_9;
+create table if not exists xiong_test_merge_feature11_9 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count9
+from xiong_test_merge_feature11_8 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi9_bssid=b.wifi_name;
+
+drop table if exists xiong_test_merge_feature11_10;
+create table if not exists xiong_test_merge_feature11_10 as
+select a.*,b.shop_wifi_connect_count as shop_wifi_connect_count10
+from xiong_test_merge_feature11_9 a left outer join test_feature11 b 
+on a.can_shop_id=b.shop_id and a.wifi10_bssid=b.wifi_name;
+
+--特征12：让xiong_test_merge_feature11_10中的shop_wifi_connect_count除以shop_wifi_count算连接率
+Drop table if exists xiong_test_merge_feature12;
+create table if not exists xiong_test_merge_feature12 as
+select a.*,
+shop_wifi_connect_count1/shop_wifi_count1 lianjie1,shop_wifi_connect_count2/shop_wifi_count2 lianjie2,shop_wifi_connect_count3/shop_wifi_count3 lianjie3,
+shop_wifi_connect_count4/shop_wifi_count4 lianjie4,shop_wifi_connect_count5/shop_wifi_count5 lianjie5,shop_wifi_connect_count6/shop_wifi_count6 lianjie6,
+shop_wifi_connect_count7/shop_wifi_count7 lianjie7,shop_wifi_connect_count8/shop_wifi_count8 lianjie8,shop_wifi_connect_count9/shop_wifi_count9 lianjie9,
+shop_wifi_connect_count10/shop_wifi_count10 lianjie10
+from xiong_test_merge_feature11_10 a;
+
+--特征13：计算xiong_df_merge中user|shop出现的次数，并算出user在那个商店出现的概率
+--user|shop出现次数
+Drop table if exists test_feature13_1;
+create table if not exists test_feature13_1 as
+select shop_id,user_id,count(user_id) as user_shop_count
+from xiong_df_merge group by shop_id,user_id;
+
+--user|mall出现次数
+drop table if exists test_feature13_2;
+create table if not exists test_feature13_2 as
+select user_id,mall_id,count(user_id) as user_mall_count
+from xiong_df_merge group by user_id,mall_id;
+
+--计算每个user在每个mall里面出现的概率
+drop table if exists test_feature13_3;
+create table if not exists test_feature13_3 as
+select a.*,b.user_mall_count
+from test_feature13_1 a left outer join test_feature13_2 b
+on a.user_id=b.user_id;
+
+drop table if exists test_feature13;
+create table if not exists test_feature13 as
+select a.*,user_shop_count/user_mall_count user_shop_lv
+from test_feature13_3 a;
+--把test_fature13匹配进入xiong_test_merge_feature12
+drop table if exists xiong_test_merge_feature13;
+create table if not exists xiong_test_merge_feature13 as
+select a.*,b.user_shop_count,b.user_shop_lv,b.user_mall_count
+from xiong_test_merge_feature12 a left outer join test_feature13 b 
+on a.user_id=b.user_id and a.can_shop_id=b.shop_id;
+
+-- 特征15： ##### 对xiong_can_train3的wifi_infos2进行切分成 wifi_name,wifi_strength,wifi_connect 保存于表xiong_can_train4 ######
+Drop table if exists xiong_df_merge_split_wifi;
+create table if not exists xiong_df_merge_split_wifi as
+select
+      split_part(wifi_infos2,'|',1) as wifi_name,
+      cast(if(split_part(wifi_infos2,'|',2)='null',-68,split_part(wifi_infos2,'|',2)) as int) as wifi_strength,
+	  if(split_part(wifi_infos2,'|',3)='true',1,0) as wifi_connect,
+      xiong_df_merge_split.*
+from xiong_df_merge_split;
+
+drop table if exists xiong_df_merge_split_wifi_biao;
+create table if not exists xiong_df_merge_split_wifi_biao as
+select t.*,to_date(time_stamp,'yyyy-MM-dd hh:mi') as time_biao from xiong_df_merge_split_wifi t;
+
+drop table if exists xiong_df_merge_split_wifi_biao1;
+create table if not exists xiong_df_merge_split_wifi_biao1 as
+select a.*,datepart(time_biao,'hour') as transaction_hour,weekday(time_biao) as transaction_weekday,if(weekday(time_biao)>4,1,0) as isoweekend,
+case when datepart(time_biao,'hour')>=6 and datepart(time_biao,'hour')<10 then 1
+     when datepart(time_biao,'hour')>=10 and datepart(time_biao,'hour')<14 then 2
+	 when datepart(time_biao,'hour')>=14 and datepart(time_biao,'hour')<18 then 3
+	 when datepart(time_biao,'hour')>=18 and datepart(time_biao,'hour')<22 then 4
+	 when datepart(time_biao,'hour')>=22 or datepart(time_biao,'hour')<6 then 0 end as daytime_part
+from xiong_df_merge_split_wifi_biao a;
+
+--计算出shop的平均transaction_hour，平均次数，中位数经纬度
+drop table if exists xiong_df_merge_split_wifi_biao2;
+create table if not exists xiong_df_merge_split_wifi_biao2 as
+select shop_id,count(shop_id)/62 as avg_count_shop,sum(transaction_hour)/62 as avg_hour_shop,median(longitude) as med_longitude_shop,median(latitude) as med_latitude_shop
+from xiong_df_merge_split_wifi_biao1 group by shop_id;
+
+--计算出shop|user的平均transaction_hour，平均次数，中位数经纬度
+drop table if exists xiong_df_merge_split_wifi_biao3 ;
+create table if not exists xiong_df_merge_split_wifi_biao3 as
+select shop_id,user_id,count(shop_id)/62 as avg_count_shop_user,sum(transaction_hour)/62 as avg_hour_shop_user,median(longitude) as med_longitude_shop_user,median(latitude) as med_latitude_shop_user
+from xiong_df_merge_split_wifi_biao1 group by shop_id,user_id;
+
+--特征16------计算出wifi|shop的平均wifi_connect
+Drop table if exists test_feature16;
+create table if not exists test_feature16 as
+select wifi_name,shop_id,avg(wifi_connect) as avg_wifi_shop_connect
+from xiong_df_merge_split_wifi group by wifi_name,shop_id;
+	 
+--把test_feature15和16匹配进入xiong_test_merge_feature13
+Drop table if exists xiong_test_merge_feature15;
+create table if not exists xiong_test_merge_feature15 as
+select a.*,b.avg_count_shop,b.avg_hour_shop,b.med_longitude_shop,b.med_latitude_shop,
+c.avg_count_shop_user,c.avg_hour_shop_user,c.med_longitude_shop_user,c.med_latitude_shop_user,
+d1.avg_wifi_shop_connect as avg_wifi1_shop_connect,d2.avg_wifi_shop_connect as avg_wifi2_shop_connect,d3.avg_wifi_shop_connect as avg_wifi3_shop_connect,
+d4.avg_wifi_shop_connect as avg_wifi4_shop_connect,d5.avg_wifi_shop_connect as avg_wifi5_shop_connect,d6.avg_wifi_shop_connect as avg_wifi6_shop_connect,
+d7.avg_wifi_shop_connect as avg_wifi7_shop_connect,d8.avg_wifi_shop_connect as avg_wifi8_shop_connect,d9.avg_wifi_shop_connect as avg_wifi9_shop_connect,
+d10.avg_wifi_shop_connect as avg_wifi10_shop_connect
+from xiong_test_merge_feature13 a 
+left outer join xiong_df_merge_split_wifi_biao2 b on b.shop_id=a.can_shop_id
+left outer join xiong_df_merge_split_wifi_biao3 c on c.shop_id=a.can_shop_id and c.user_id=a.user_id
+left outer join test_feature16 d1 on d1.wifi_name=a.wifi1_bssid and d1.shop_id=a.can_shop_id
+left outer join test_feature16 d2 on d2.wifi_name=a.wifi2_bssid and d2.shop_id=a.can_shop_id
+left outer join test_feature16 d3 on d3.wifi_name=a.wifi3_bssid and d3.shop_id=a.can_shop_id
+left outer join test_feature16 d4 on d4.wifi_name=a.wifi4_bssid and d4.shop_id=a.can_shop_id
+left outer join test_feature16 d5 on d5.wifi_name=a.wifi5_bssid and d5.shop_id=a.can_shop_id
+left outer join test_feature16 d6 on d6.wifi_name=a.wifi6_bssid and d6.shop_id=a.can_shop_id
+left outer join test_feature16 d7 on d7.wifi_name=a.wifi7_bssid and d7.shop_id=a.can_shop_id
+left outer join test_feature16 d8 on d8.wifi_name=a.wifi8_bssid and d8.shop_id=a.can_shop_id
+left outer join test_feature16 d9 on d9.wifi_name=a.wifi9_bssid and d9.shop_id=a.can_shop_id
+left outer join test_feature16 d10 on d10.wifi_name=a.wifi10_bssid and d10.shop_id=a.can_shop_id;
+
+drop table if exists xiong_test_merge_feature15_biao1;
+create table if not exists xiong_test_merge_feature15_biao1 as
+select t.*,to_date(time_stamp,'yyyy-MM-dd hh:mi') as time_biao from  xiong_test_merge_feature15 t;
+
+drop table if exists xiong_test_merge_feature15_biao;
+create table if not exists xiong_test_merge_feature15_biao as
+select a.*,datepart(time_biao,'hour') as transaction_hour,weekday(time_biao) as transaction_weekday,if(weekday(time_biao)>4,1,0) as isoweekend,
+case when datepart(time_biao,'hour')>=6 and datepart(time_biao,'hour')<10 then 1
+     when datepart(time_biao,'hour')>=10 and datepart(time_biao,'hour')<14 then 2
+	 when datepart(time_biao,'hour')>=14 and datepart(time_biao,'hour')<18 then 3
+	 when datepart(time_biao,'hour')>=18 and datepart(time_biao,'hour')<22 then 4
+	 when datepart(time_biao,'hour')>=22 or datepart(time_biao,'hour')<6 then 0 end as daytime_part
+from xiong_test_merge_feature15_biao1 a;
+
+--为了让生成的结果可以merge到那个row_id和相关的can_shop_id，对其进行行打标为row_id_num，并保存于表xiong_test_merge_feature12_row
+drop table if exists xiong_test_merge_feature15_row;
+create table if not exists xiong_test_merge_feature15_row as
+select * from
+        (
+          SELECT 
+                row_number() over(partition by row_id order by wifi_name) as row_id_num
+             ,t.*
+          FROM  xiong_test_merge_feature15_biao t
+        ) temp;
+
